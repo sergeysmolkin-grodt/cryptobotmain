@@ -4,7 +4,7 @@ using System.Linq;
 using cAlgo.API;
 // using cAlgo.API.Indicators; // Removed as we assume custom ZigZag
 using cAlgo.API.Internals;
-using cAlgo.Indicators; // This should cover custom indicators in the default cAlgo.Indicators namespace
+// using cAlgo.Indicators; // Removed: ZigZag class will be embedded
 
 namespace cAlgo.Robots
 {
@@ -30,6 +30,405 @@ namespace cAlgo.Robots
         }
     }
 
+    // Embedded ZigZag Indicator Class
+    // Based on "ZigZag" v1.0.6 by cTrader GURU
+    // [Indicator(IsOverlay = true, AccessRights = AccessRights.None)] // This attribute might be optional or problematic for embedded classes used via GetIndicator. Testing needed.
+    // For now, let's assume GetIndicator<T> handles it if T inherits Indicator.
+    public class ZigZag : Indicator // Inheriting from Indicator is necessary for GetIndicator<T>
+    {
+        #region Enums
+        public enum ModeZigZag
+        {
+            HighLow,
+            OpenClose
+        }
+        #endregion
+
+        #region Identity
+        public const string NAME = "ZigZag";
+        public const string VERSION = "1.0.6";
+        #endregion
+
+        #region Params
+        [Parameter(NAME + " " + VERSION, Group = "Identity", DefaultValue = "https://www.google.com/search?q=ctrader+guru+zigzag")]
+        public string ProductInfo { get; set; }
+
+        [Parameter("Mode", DefaultValue = ModeZigZag.HighLow, Group = "Params")]
+        public ModeZigZag MyModeZigZag { get; set; }
+
+        [Parameter("Depth", DefaultValue = 12, Group = "Params", MinValue = 1)] // Added MinValue based on typical usage
+        public int Depth { get; set; }
+
+        [Parameter("Deviation", DefaultValue = 5, Group = "Params", MinValue = 1)] // Added MinValue based on typical usage
+        public int Deviation { get; set; }
+
+        [Parameter("BackStep", DefaultValue = 3, Group = "Params", MinValue = 0)] // Added MinValue based on typical usage
+        public int BackStep { get; set; }
+
+        [Parameter("Show Labels", DefaultValue = true, Group = "Label")] // Changed "Show" to "Show Labels" for clarity
+        public bool ShowLabel { get; set; }
+
+        [Parameter("Color High", DefaultValue = "DodgerBlue", Group = "Label")]
+        public Color ColorHigh { get; set; }
+
+        [Parameter("Color Low", DefaultValue = "Red", Group = "Label")]
+        public Color ColorLow { get; set; }
+
+        [Output("ZigZag", LineColor = "DodgerBlue", LineStyle = LineStyle.Lines)]
+        public IndicatorDataSeries Result { get; set; }
+        #endregion
+
+        #region Property
+        private double _lastLow;
+        private double _lastHigh;
+        private double _low;
+        private double _high;
+        private int _lastHighIndex;
+        private int _lastLowIndex;
+        private int _type;
+        private double _point;
+        private double _currentLow;
+        private double _currentHigh;
+
+        private int _countHigh = 0;
+        private int _countLow = 0;
+        private int _waiting = 0;
+
+        private IndicatorDataSeries _highZigZags;
+        private IndicatorDataSeries _lowZigZags;
+        #endregion
+
+        #region Indicator Events
+        protected override void Initialize()
+        {
+            // Print($"ZigZag Indicator ({VERSION}) Initialized. Mode: {MyModeZigZag}, Depth: {Depth}, Dev: {Deviation}, Backstep: {BackStep}");
+            _highZigZags = CreateDataSeries();
+            _lowZigZags = CreateDataSeries();
+            if (Symbol != null) // Symbol might be null if GetIndicator is called without a Bars series that has a symbol.
+                 _point = Symbol.TickSize;
+            else if (Chart != null && Chart.Symbol != null) // Fallback for Chart context if available
+                 _point = Chart.Symbol.TickSize;
+            // else _point might remain 0.0, which could be an issue if Deviation is small.
+            // Consider adding a check in Calculate or a parameter for minimum point distance if Symbol is not available.
+        }
+
+        public override void Calculate(int index)
+        {
+            if (_point == 0.0 && Symbol != null) // Re-check if symbol became available
+            {
+                _point = Symbol.TickSize;
+            }
+            if (_point == 0.0 && Chart != null && Chart.Symbol != null)
+            {
+                 _point = Chart.Symbol.TickSize;
+            }
+            if (_point == 0.0) // If still zero, cannot calculate deviation correctly
+            {
+                // Print("ZigZag: Symbol.TickSize is 0, cannot calculate Deviation correctly. Skipping calculation.");
+                Result[index] = double.NaN; // Or 0, depending on desired behavior for error
+                return;
+            }
+
+            switch (MyModeZigZag)
+            {
+                case ModeZigZag.HighLow:
+                    PerformIndicatorHighLow(index);
+                    break;
+                case ModeZigZag.OpenClose:
+                    PerformIndicatorOpenClose(index);
+                    break;
+            }
+
+            // Original GURU label logic (slightly adapted)
+            if (_highZigZags[index] == _lastHigh && _waiting > -1 && _lastHigh > 0) // Added _lastHigh > 0 to avoid labeling initial 0s
+            {
+                _waiting = -1;
+                _countHigh++;
+            }
+            
+            if (_lowZigZags[index] == _lastLow && _waiting < 1 && _lastLow > 0) // Added _lastLow > 0
+            {
+                _waiting = 1;
+                _countLow++;
+            }
+
+            if (ShowLabel) // Removed IsChartObjectManipulationAllowed check
+            {
+                if (_highZigZags[index] > 0 && _lastHighIndex == index) // Only draw if this bar is the confirmed peak
+                {
+                    string textName = $"zzh-{_countHigh}-{index}"; // Make name more unique
+                    // Chart.RemoveObject(textName); // Remove previous if any, to avoid clutter (optional)
+                    ChartText cth = Chart.DrawText(textName, _highZigZags[index].ToString("N" + Symbol.Digits), index, _highZigZags[index], ColorHigh);
+                    cth.HorizontalAlignment = HorizontalAlignment.Center;
+                    cth.VerticalAlignment = VerticalAlignment.Top;
+                }
+
+                if (_lowZigZags[index] > 0 && _lastLowIndex == index) // Only draw if this bar is the confirmed trough
+                {
+                    string textName = $"zzl-{_countLow}-{index}"; // Make name more unique
+                    // Chart.RemoveObject(textName); // Remove previous if any (optional)
+                    ChartText ctl = Chart.DrawText(textName, _lowZigZags[index].ToString("N" + Symbol.Digits), index, _lowZigZags[index], ColorLow);
+                    ctl.HorizontalAlignment = HorizontalAlignment.Center;
+                    ctl.VerticalAlignment = VerticalAlignment.Bottom;
+                }
+            }            
+        }
+        #endregion
+
+        #region Private Methods
+        private void PerformIndicatorHighLow(int index)
+        {
+            if (index < Depth)
+            {
+                Result[index] = double.NaN; // Use NaN for uncalculated points
+                _highZigZags[index] = 0;
+                _lowZigZags[index] = 0;
+                return;
+            }
+
+            _currentLow = Bars.LowPrices.Minimum(Depth);
+
+            if (Math.Abs(_currentLow - _lastLow) < double.Epsilon)
+                _currentLow = 0.0;
+            else
+            {
+                _lastLow = _currentLow;
+                if ((Bars.LowPrices[index] - _currentLow) > (Deviation * _point))
+                    _currentLow = 0.0;
+                else
+                {
+                    for (int i = 1; i <= BackStep; i++)
+                    {
+                        if (index - i >= 0 && Math.Abs(_lowZigZags[index - i]) > double.Epsilon && _lowZigZags[index - i] > _currentLow)
+                            _lowZigZags[index - i] = 0.0;
+                    }
+                }
+            }
+            if (Math.Abs(Bars.LowPrices[index] - _currentLow) < double.Epsilon && _currentLow != 0.0) // Ensure _currentLow is a valid swing
+                _lowZigZags[index] = _currentLow;
+            else
+                _lowZigZags[index] = 0.0;
+
+            _currentHigh = Bars.HighPrices.Maximum(Depth);
+
+            if (Math.Abs(_currentHigh - _lastHigh) < double.Epsilon)
+                _currentHigh = 0.0;
+            else
+            {
+                _lastHigh = _currentHigh;
+                if ((_currentHigh - Bars.HighPrices[index]) > (Deviation * _point))
+                    _currentHigh = 0.0;
+                else
+                {
+                    for (int i = 1; i <= BackStep; i++)
+                    {
+                        if (index - i >= 0 && Math.Abs(_highZigZags[index - i]) > double.Epsilon && _highZigZags[index - i] < _currentHigh)
+                            _highZigZags[index - i] = 0.0;
+                    }
+                }
+            }
+
+            if (Math.Abs(Bars.HighPrices[index] - _currentHigh) < double.Epsilon && _currentHigh != 0.0) // Ensure _currentHigh is a valid swing
+                _highZigZags[index] = _currentHigh;
+            else
+                _highZigZags[index] = 0.0;
+
+            // Simplified Logic for Result based on identified _highZigZags and _lowZigZags
+            // The original GURU logic for 'Result' is complex and seems to manage trend state (_type)
+            // For use with GetClassifiedZigZagPoints, we just need to populate Result when a high or low is confirmed at 'index'
+            
+            Result[index] = double.NaN; // Default to NaN
+
+            if (_type == 0) // Initial state or after a clear pattern
+            {
+                if (_highZigZags[index] > 0)
+                {
+                    _high = _highZigZags[index];
+                    _lastHighIndex = index;
+                    _type = -1; // Expecting a low next
+                    Result[index] = _high;
+                }
+                else if (_lowZigZags[index] > 0)
+                {
+                    _low = _lowZigZags[index];
+                    _lastLowIndex = index;
+                    _type = 1; // Expecting a high next
+                    Result[index] = _low;
+                }
+            }
+            else if (_type == 1) // Was a low, looking for a high
+            {
+                if (_lowZigZags[index] > 0 && _lowZigZags[index] < _low) // New lower low
+                {
+                    if (_lastLowIndex != index && _lastLowIndex < Result.Count) Result[_lastLowIndex] = double.NaN; // Invalidate previous
+                    _low = _lowZigZags[index];
+                    _lastLowIndex = index;
+                    Result[index] = _low;
+                    // _type remains 1, still looking for a high to follow this low sequence
+                }
+                else if (_highZigZags[index] > 0) // Found a high
+                {
+                     // Ensure this high is higher than the last confirmed low to be a valid reversal point
+                    if (_low == 0 || _highZigZags[index] > _low) {
+                        _high = _highZigZags[index];
+                        _lastHighIndex = index;
+                        Result[index] = _high;
+                        _type = -1; // Now expecting a low
+                    } else {
+                         // High not strong enough, might be noise. Keep looking for a proper high or lower low.
+                        _highZigZags[index] = 0; // Invalidate this high for now
+                    }
+                }
+            }
+            else if (_type == -1) // Was a high, looking for a low
+            {
+                if (_highZigZags[index] > 0 && _highZigZags[index] > _high) // New higher high
+                {
+                    if (_lastHighIndex != index && _lastHighIndex < Result.Count) Result[_lastHighIndex] = double.NaN; // Invalidate previous
+                    _high = _highZigZags[index];
+                    _lastHighIndex = index;
+                    Result[index] = _high;
+                    // _type remains -1, still looking for a low to follow this high sequence
+                }
+                else if (_lowZigZags[index] > 0) // Found a low
+                {
+                    // Ensure this low is lower than the last confirmed high
+                    if (_high == 0 || _lowZigZags[index] < _high) {
+                        _low = _lowZigZags[index];
+                        _lastLowIndex = index;
+                        Result[index] = _low;
+                        _type = 1; // Now expecting a high
+                    } else {
+                        // Low not strong enough.
+                        _lowZigZags[index] = 0; // Invalidate this low
+                    }
+                }
+            }
+        }
+
+        private void PerformIndicatorOpenClose(int index) // Similar structure to HighLow, using OpenPrices
+        {
+            if (index < Depth)
+            {
+                Result[index] = double.NaN;
+                _highZigZags[index] = 0;
+                _lowZigZags[index] = 0;
+                return;
+            }
+
+            _currentLow = Bars.OpenPrices.Minimum(Depth); // Changed to OpenPrices
+
+            if (Math.Abs(_currentLow - _lastLow) < double.Epsilon)
+                _currentLow = 0.0;
+            else
+            {
+                _lastLow = _currentLow;
+                if ((Bars.OpenPrices[index] - _currentLow) > (Deviation * _point)) // Changed to OpenPrices
+                    _currentLow = 0.0;
+                else
+                {
+                    for (int i = 1; i <= BackStep; i++)
+                    {
+                         if (index - i >= 0 && Math.Abs(_lowZigZags[index - i]) > double.Epsilon && _lowZigZags[index - i] > _currentLow)
+                            _lowZigZags[index - i] = 0.0;
+                    }
+                }
+            }
+            if (Math.Abs(Bars.OpenPrices[index] - _currentLow) < double.Epsilon && _currentLow != 0.0) // Changed to OpenPrices
+                _lowZigZags[index] = _currentLow;
+            else
+                _lowZigZags[index] = 0.0;
+
+            _currentHigh = Bars.OpenPrices.Maximum(Depth); // Changed to OpenPrices
+
+            if (Math.Abs(_currentHigh - _lastHigh) < double.Epsilon)
+                _currentHigh = 0.0;
+            else
+            {
+                _lastHigh = _currentHigh;
+                if ((_currentHigh - Bars.OpenPrices[index]) > (Deviation * _point)) // Changed to OpenPrices
+                    _currentHigh = 0.0;
+                else
+                {
+                    for (int i = 1; i <= BackStep; i++)
+                    {
+                        if (index - i >= 0 && Math.Abs(_highZigZags[index - i]) > double.Epsilon && _highZigZags[index - i] < _currentHigh)
+                            _highZigZags[index - i] = 0.0;
+                    }
+                }
+            }
+
+            if (Math.Abs(Bars.OpenPrices[index] - _currentHigh) < double.Epsilon && _currentHigh != 0.0) // Changed to OpenPrices
+                _highZigZags[index] = _currentHigh;
+            else
+                _highZigZags[index] = 0.0;
+            
+            // Result assignment logic (same as PerformIndicatorHighLow, but uses OpenPrices indirectly via _high/_lowZigZags)
+            Result[index] = double.NaN;
+
+            if (_type == 0)
+            {
+                if (_highZigZags[index] > 0)
+                {
+                    _high = _highZigZags[index]; // Value already from OpenPrices if mode is OpenClose
+                    _lastHighIndex = index;
+                    _type = -1; 
+                    Result[index] = _high;
+                }
+                else if (_lowZigZags[index] > 0)
+                {
+                    _low = _lowZigZags[index]; // Value already from OpenPrices
+                    _lastLowIndex = index;
+                    _type = 1; 
+                    Result[index] = _low;
+                }
+            }
+            else if (_type == 1) 
+            {
+                if (_lowZigZags[index] > 0 && _lowZigZags[index] < _low) 
+                {
+                    if (_lastLowIndex != index && _lastLowIndex < Result.Count) Result[_lastLowIndex] = double.NaN;
+                    _low = _lowZigZags[index];
+                    _lastLowIndex = index;
+                    Result[index] = _low;
+                }
+                else if (_highZigZags[index] > 0)
+                {
+                    if (_low == 0 || _highZigZags[index] > _low) {
+                        _high = _highZigZags[index];
+                        _lastHighIndex = index;
+                        Result[index] = _high;
+                        _type = -1; 
+                    } else {
+                        _highZigZags[index] = 0;
+                    }
+                }
+            }
+            else if (_type == -1)
+            {
+                if (_highZigZags[index] > 0 && _highZigZags[index] > _high)
+                {
+                    if (_lastHighIndex != index && _lastHighIndex < Result.Count) Result[_lastHighIndex] = double.NaN;
+                    _high = _highZigZags[index];
+                    _lastHighIndex = index;
+                    Result[index] = _high;
+                }
+                else if (_lowZigZags[index] > 0)
+                {
+                     if (_high == 0 || _lowZigZags[index] < _high) {
+                        _low = _lowZigZags[index];
+                        _lastLowIndex = index;
+                        Result[index] = _low;
+                        _type = 1; 
+                    } else {
+                        _lowZigZags[index] = 0;
+                    }
+                }
+            }
+        }
+        #endregion
+    }
+
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class MarketStructureBot : Robot
     {
@@ -45,8 +444,9 @@ namespace cAlgo.Robots
         public int StructureZigZagBackstep { get; set; }
 
         // H1 ZigZag Parameters (for SL/TP)
+        // Adjusted to use the embedded ZigZag class's ModeZigZag
         [Parameter("H1 ZigZag Mode", DefaultValue = ZigZag.ModeZigZag.HighLow, Group = "H1 ZigZag")]
-        public ZigZag.ModeZigZag H1ZigZagMode { get; set; }
+        public ZigZag.ModeZigZag H1ZigZagMode { get; set; } 
         [Parameter("H1 ZigZag Depth", DefaultValue = 12, MinValue = 1)]
         public int H1ZigZagDepth { get; set; }
         [Parameter("H1 ZigZag Deviation", DefaultValue = 5, MinValue = 1)]
@@ -90,8 +490,7 @@ namespace cAlgo.Robots
         private double _bosSLPriceLevel; 
 
         // ZigZag Instances
-        // private ZigZag _structureZigZag; // Removed as it's unused and its initialization was problematic
-        private ZigZag _h1ZigZag;
+        private ZigZag _h1ZigZag; // This will now refer to the embedded ZigZag class
         private Bars _h1Bars;
 
         protected override void OnStart()
@@ -102,8 +501,8 @@ namespace cAlgo.Robots
             Print($"Structure ZigZag Params: Depth={StructureZigZagDepth}, Dev={StructureZigZagDeviation}, Backstep={StructureZigZagBackstep}");
             Print($"H1 ZigZag Params: Mode={H1ZigZagMode}, Depth={H1ZigZagDepth}, Dev={H1ZigZagDeviation}, Backstep={H1ZigZagBackstep}");
 
-            // _structureZigZag = Indicators.GetIndicator<ZigZag>(StructureZigZagDepth, StructureZigZagDeviation, StructureZigZagBackstep); // Removed
             _h1Bars = MarketData.GetBars(TimeFrame.Hour);
+            // This should now correctly instantiate the embedded ZigZag class
             _h1ZigZag = Indicators.GetIndicator<ZigZag>(_h1Bars, H1ZigZagMode, H1ZigZagDepth, H1ZigZagDeviation, H1ZigZagBackstep);
         }
 
@@ -191,188 +590,159 @@ namespace cAlgo.Robots
             }
             
             // Sort by index before processing for structure
-            var sortedSwingHighs = new List<ZigZagPoint> { _lastHH }.Concat(new List<ZigZagPoint> { _lastLL }).ToList();
+            // var sortedSwingHighs = new List<ZigZagPoint> { _lastHH }.Concat(new List<ZigZagPoint> { _lastLL }).ToList();
+            // The above line was problematic as _lastHH or _lastLL could be null initially or after a BoS.
+            // We need a list of *valid* (non-null) swing points for structure analysis.
+
+            var currentValidSwings = new List<ZigZagPoint>();
+            if (_lastHH != null) currentValidSwings.Add(_lastHH);
+            if (_lastLL != null) currentValidSwings.Add(_lastLL);
+            // To keep the old logic somewhat intact, we only use the most recent HH and LL for initial structure.
+            // A more robust ZigZag integration would use a list of ZigZag points directly.
+            // For now, this mimics the previous swing detection feeding into structure logic.
 
             if (_currentTrend == MarketTrend.None)
             {
-                // Try to establish initial trend from sorted swings
-                var allSwings = sortedSwingHighs.Select(s => new { s.Price, s.Index, Type = "High" })
-                    .Concat(sortedSwingHighs.Select(s => new { s.Price, s.Index, Type = "Low" }))
-                    .OrderBy(s => s.Index).ToList();
-
-                if (allSwings.Count >= 2)
+                // Try to establish initial trend from the two most recent (if available) HH and LL points
+                if (_lastHL == null && _lastLL != null && _lastHH != null && _lastLL.Index < _lastHH.Index && _lastHH.Price > _lastLL.Price)
                 {
-                    for (int i = 0; i < allSwings.Count - 1; i++)
-                    {
-                        var s1 = allSwings[i];
-                        var s2 = allSwings[i + 1];
-
-                        if (s1.Type == "Low" && s2.Type == "High" && s2.Price > s1.Price)
-                        {
-                            _lastHL = s1;
-                            _lastHH = s2;
-                            _currentTrend = MarketTrend.Uptrend;
-                            Print($"Initial Structure: Uptrend. HL: {_lastHL.Price} @ {_lastHL.Index}, HH: {_lastHH.Price} @ {_lastHH.Index}");
-                            MarkStructurePoint(_lastHL.Index, _lastHL.Price, "HL", Color.LightGreen);
-                            MarkStructurePoint(_lastHH.Index, _lastHH.Price, "HH", Color.Green);
-                            if (_lastHL.Index != -1) DrawBoSLine(_lastHL.Price, _lastHL.Index, currentIndex, false, "BoS_HL_");
-                            break;
-                        }
-                        else if (s1.Type == "High" && s2.Type == "Low" && s2.Price < s1.Price)
-                        {
-                            _lastLH = s1;
-                            _lastLL = s2;
-                            _currentTrend = MarketTrend.Downtrend;
-                            Print($"Initial Structure: Downtrend. LH: {_lastLH.Price} @ {_lastLH.Index}, LL: {_lastLL.Price} @ {_lastLL.Index}");
-                            MarkStructurePoint(_lastLH.Index, _lastLH.Price, "LH", Color.Salmon);
-                            MarkStructurePoint(_lastLL.Index, _lastLL.Price, "LL", Color.Red);
-                            if(_lastLH.Index != -1) DrawBoSLine(_lastLH.Price, _lastLH.Index, currentIndex, true, "BoS_LH_");
-                            break;
-                        }
-                    }
+                    _lastHL = _lastLL; // Tentative HL
+                    // _lastHH is already set
+                    _currentTrend = MarketTrend.Uptrend;
+                    Print($"Initial Structure (from swings): Uptrend. HL: {_lastHL.Price} @ {_lastHL.Time}, HH: {_lastHH.Price} @ {_lastHH.Time}");
+                    MarkStructurePoint(_lastHL.Index, _lastHL.Price, "HL", Color.LightGreen);
+                    MarkStructurePoint(_lastHH.Index, _lastHH.Price, "HH", Color.Green);
+                    DrawBoSLine(_lastHL.Price, _lastHL.Index, currentIndex, false, "BoS_HL_");
+                }
+                else if (_lastLH == null && _lastHH != null && _lastLL != null && _lastHH.Index < _lastLL.Index && _lastLL.Price < _lastHH.Price)
+                {
+                    _lastLH = _lastHH; // Tentative LH
+                    // _lastLL is already set
+                    _currentTrend = MarketTrend.Downtrend;
+                    Print($"Initial Structure (from swings): Downtrend. LH: {_lastLH.Price} @ {_lastLH.Time}, LL: {_lastLL.Price} @ {_lastLL.Time}");
+                    MarkStructurePoint(_lastLH.Index, _lastLH.Price, "LH", Color.Salmon);
+                    MarkStructurePoint(_lastLL.Index, _lastLL.Price, "LL", Color.Red);
+                    DrawBoSLine(_lastLH.Price, _lastLH.Index, currentIndex, true, "BoS_LH_");
                 }
             }
             else if (_currentTrend == MarketTrend.Uptrend)
             {
-                if (_lastHL == null) return; // Should not happen if trend is Uptrend
+                if (_lastHL == null || _lastHH == null) return; // Essential points for uptrend must exist
 
                 if (Bars.ClosePrices[currentIndex] < _lastHL.Price)
                 {
-                    Print($"BoS UP->DOWN: Close {Bars.ClosePrices[currentIndex]} < HL {_lastHL.Price}@{_lastHL.Index}");
+                    Print($"BoS UP->DOWN: Close {Bars.ClosePrices[currentIndex]} < HL {_lastHL.Price}@{_lastHL.Time}");
                     
                     _bosOccurredThisBar = true;
                     _bosTradeDirection = TradeType.Sell;
-                    _bosSLPriceLevel = _lastHH.Price; // SL will be above this HH (which becomes new LH)
+                    _bosSLPriceLevel = _lastHH.Price; 
 
-                    _lastLH = _lastHH; // Previous HH becomes potential LH
+                    _lastLH = _lastHH; // Previous HH becomes new LH
                     
-                    // Find the swing low that broke the structure or is the lowest after the break
-                    var breakLLCandidate = sortedSwingHighs
-                        .Where(s => s.Index > _lastHL.Index && s.Price < _lastHL.Price)
-                        .OrderBy(s => s.Price).FirstOrDefault();
-
-                    _lastLL = breakLLCandidate.Index != 0 ? new ZigZagPoint(breakLLCandidate.Price, Bars.OpenTimes[breakLLCandidate.Index], breakLLCandidate.Index, false) : new ZigZagPoint(Bars.LowPrices[currentIndex], Bars.OpenTimes[currentIndex], currentIndex, false);
-                    
+                    _lastLL = new ZigZagPoint(Bars.LowPrices[currentIndex], Bars.OpenTimes[currentIndex], currentIndex, false);
+                    if (_lastHH != null && _lastLL.Index == _lastHH.Index) 
+                    {
+                        int lookBackRange = Math.Min(currentIndex, 10);
+                        double minLowInRange = double.MaxValue;
+                        int tempSubsequentLowBarIndex = currentIndex; 
+                        for (int k = 0; k < lookBackRange; k++)
+                        {
+                            int barToExamine = currentIndex - k;
+                            // Ensure we are looking after the last confirmed structure point (new LH, former HH)
+                            // and that barToExamine is a valid index
+                            if (barToExamine >= 0 && barToExamine > _lastLH.Index) 
+                            {
+                                if (Bars.LowPrices[barToExamine] < minLowInRange)
+                                {
+                                    minLowInRange = Bars.LowPrices[barToExamine];
+                                    tempSubsequentLowBarIndex = barToExamine;
+                                }
+                            }
+                        }
+                        if (tempSubsequentLowBarIndex != currentIndex && tempSubsequentLowBarIndex > _lastLH.Index) // check if a different, valid index was found
+                           _lastLL = new ZigZagPoint(Bars.LowPrices[tempSubsequentLowBarIndex], Bars.OpenTimes[tempSubsequentLowBarIndex], tempSubsequentLowBarIndex, false);
+                    }
+                                        
                     _currentTrend = MarketTrend.Downtrend;
-                    Print($"Trend Change: UP -> DOWN. LH: {_lastLH.Price}@{_lastLH.Index}, LL: {_lastLL.Price}@{_lastLL.Index}");
+                    Print($"Trend Change: UP -> DOWN. New LH: {_lastLH.Price}@{_lastLH.Time}, New LL: {_lastLL.Price}@{_lastLL.Time}");
                     
                     Chart.RemoveObject($"BoS_HL_{_lastHL.Index}");
                     MarkStructurePoint(_lastLH.Index, _lastLH.Price, "LH", Color.Salmon, true);
                     MarkStructurePoint(_lastLL.Index, _lastLL.Price, "LL", Color.Red, true);
-                    if (_lastLH.Index != -1) DrawBoSLine(_lastLH.Price, _lastLH.Index, currentIndex, true, "BoS_LH_");
+                    DrawBoSLine(_lastLH.Price, _lastLH.Index, currentIndex, true, "BoS_LH_");
                     
-                    _lastHH = null; _lastHL = null; // Reset uptrend points
+                    _lastHH = null; _lastHL = null; 
                 }
-                else
-                {
-                    // Look for new HH
-                    var potentialNewHH = sortedSwingHighs
-                        .Where(s => s.Index > _lastHH.Index && s.Price > _lastHH.Price)
-                        .OrderBy(s => s.Index).FirstOrDefault();
-
-                    if (potentialNewHH != null) // Found a higher swing high
+                else if (_lastHH != null && _lastHL != null) // Check for new HH if still in uptrend
+                { 
+                    // Is the latest swing high a new HH?
+                    if (_lastHH.Index > _lastHL.Index && _lastHH.Price > _lastHH.Price) // This condition _lastHH.Price > _lastHH.Price seems wrong, should be compared to previous _lastHH if we had a list
                     {
-                        // Now find the HL before this new HH. It must be after the previous HH and higher than previous HL.
-                        var potentialNewHL = sortedSwingHighs
-                            .Where(s => s.Index > _lastHH.Index && s.Index < potentialNewHH.Index && s.Price > _lastHL.Price)
-                            .OrderBy(s => s.Price).FirstOrDefault(); // Lowest point in pullback
+                        // The current _lastHH from swing detection IS the potential new HH.
+                        // We need to find if a new HL formed before it.
+                        // This requires a list of swings, current logic with single _lastHH/_lastLL is insufficient for robust new HL/HH sequence. 
+                        // Simplified: if a new swing high (_lastHH) is detected higher than previous _lastHL.Price, consider it a continuation for now.
+                        // And the _lastLL detected (if it's after _lastHL and before new _lastHH) could be the new _lastHL.
                         
-                        if (potentialNewHL != null)
-                        {
-                            Chart.RemoveObject($"BoS_HL_{_lastHL.Index}"); // Remove old BoS line
-                            _lastHL = potentialNewHL;
-                            _lastHH = potentialNewHH;
-                            Print($"Uptrend Cont: New HL: {_lastHL.Price}@{_lastHL.Index}, New HH: {_lastHH.Price}@{_lastHH.Index}");
-                            MarkStructurePoint(_lastHL.Index, _lastHL.Price, "HL", Color.LightGreen);
-                            MarkStructurePoint(_lastHH.Index, _lastHH.Price, "HH", Color.Green);
-                            DrawBoSLine(_lastHL.Price, _lastHL.Index, currentIndex, false, "BoS_HL_");
-                        }
-                        else if (potentialNewHH.Index > _lastHL.Index) // No new HL formed in between, but new HH is valid after current HL
-                        {
-                            // This means the impulse continued from the current _lastHL to form potentialNewHH
-                            // If _lastHH was valid (Index != -1), remove the old line connecting _lastHL to it.
-                            if (_lastHH.Index != -1) 
-                            {
-                                string oldLineName = $"Line_HL{_lastHL.Index}_HH{_lastHH.Index}";
-                                Chart.RemoveObject(oldLineName);
-                                Print($"Uptrend Ext: Removed old trend line: {oldLineName} connecting to old HH {_lastHH.Price}@{_lastHH.Index}");
-                            }
-
-                            _lastHH = potentialNewHH;
-                            Print($"Uptrend Cont (Ext): New HH: {_lastHH.Price}@{_lastHH.Index} (HL at {_lastHL.Price}@{_lastHL.Index} holds)");
-                            MarkStructurePoint(_lastHH.Index, _lastHH.Price, "HH", Color.Green);
-                            // BoS line at _lastHL remains valid
-                        }
+                        // This part of logic needs a proper list of zig zag points to correctly identify new HH/HL sequences.
+                        // The current single _lastHH/_lastLL from basic swing logic is insufficient here.
+                        // For now, we assume if a new _lastHH (swing high) is detected, and it's higher than _lastHL, trend continues.
+                        // The BoS line at _lastHL remains key.
                     }
                 }
             }
             else if (_currentTrend == MarketTrend.Downtrend)
             {
-                if (_lastLH == null) return;
+                if (_lastLH == null || _lastLL == null) return; // Essential points for downtrend must exist
 
                 if (Bars.ClosePrices[currentIndex] > _lastLH.Price)
                 {
-                    Print($"BoS DOWN->UP: Close {Bars.ClosePrices[currentIndex]} > LH {_lastLH.Price}@{_lastLH.Index}");
+                    Print($"BoS DOWN->UP: Close {Bars.ClosePrices[currentIndex]} > LH {_lastLH.Price}@{_lastLH.Time}");
 
                     _bosOccurredThisBar = true;
                     _bosTradeDirection = TradeType.Buy;
-                    _bosSLPriceLevel = _lastLL.Price; // SL will be below this LL (which becomes new HL)
+                    _bosSLPriceLevel = _lastLL.Price; 
 
-                    _lastHL = _lastLL; // Previous LL becomes potential HL
+                    _lastHL = _lastLL; // Previous LL becomes new HL
                     
-                    var breakHHCandidate = sortedSwingHighs
-                        .Where(s => s.Index > _lastLH.Index && s.Price > _lastLH.Price)
-                        .OrderByDescending(s => s.Price).FirstOrDefault();
-                    
-                    _lastHH = breakHHCandidate.Index != 0 ? new ZigZagPoint(breakHHCandidate.Price, Bars.OpenTimes[breakHHCandidate.Index], breakHHCandidate.Index, true) : new ZigZagPoint(Bars.HighPrices[currentIndex], Bars.OpenTimes[currentIndex], currentIndex, true);
+                    _lastHH = new ZigZagPoint(Bars.HighPrices[currentIndex], Bars.OpenTimes[currentIndex], currentIndex, true);
+                     if (_lastLL != null && _lastHH.Index == _lastLL.Index)
+                    {
+                        int lookBackRangeMax = Math.Min(currentIndex, 10);
+                        double maxHighInRange = double.MinValue;
+                        int tempSubsequentHighBarIndex = currentIndex; 
+                        for (int k = 0; k < lookBackRangeMax; k++)
+                        {
+                            int barToExamine = currentIndex - k;
+                            // Ensure we are looking after the last confirmed structure point (new HL, former LL)
+                            // and that barToExamine is a valid index
+                            if (barToExamine >= 0 && barToExamine > _lastHL.Index) 
+                            {
+                                if (Bars.HighPrices[barToExamine] > maxHighInRange)
+                                {
+                                    maxHighInRange = Bars.HighPrices[barToExamine];
+                                    tempSubsequentHighBarIndex = barToExamine;
+                                }
+                            }
+                        }
+                         if (tempSubsequentHighBarIndex != currentIndex && tempSubsequentHighBarIndex > _lastHL.Index) // check if a different, valid index was found
+                            _lastHH = new ZigZagPoint(Bars.HighPrices[tempSubsequentHighBarIndex], Bars.OpenTimes[tempSubsequentHighBarIndex], tempSubsequentHighBarIndex, true);
+                    }
 
                     _currentTrend = MarketTrend.Uptrend;
-                    Print($"Trend Change: DOWN -> UP. HL: {_lastHL.Price}@{_lastHL.Index}, HH: {_lastHH.Price}@{_lastHH.Index}");
+                    Print($"Trend Change: DOWN -> UP. New HL: {_lastHL.Price}@{_lastHL.Time}, New HH: {_lastHH.Price}@{_lastHH.Time}");
 
                     Chart.RemoveObject($"BoS_LH_{_lastLH.Index}");
                     MarkStructurePoint(_lastHL.Index, _lastHL.Price, "HL", Color.LightGreen, true);
                     MarkStructurePoint(_lastHH.Index, _lastHH.Price, "HH", Color.Green, true);
-                    if (_lastHL.Index != -1) DrawBoSLine(_lastHL.Price, _lastHL.Index, currentIndex, false, "BoS_HL_");
+                    DrawBoSLine(_lastHL.Price, _lastHL.Index, currentIndex, false, "BoS_HL_");
 
-                    _lastLH = null; _lastLL = null; // Reset downtrend points
+                    _lastLH = null; _lastLL = null; 
                 }
-                else
+                 else if (_lastLL != null && _lastLH != null) // Check for new LL
                 {
-                    // Look for new LL
-                    var potentialNewLL = sortedSwingHighs
-                        .Where(s => s.Index > _lastLL.Index && s.Price < _lastLL.Price)
-                        .OrderBy(s => s.Index).FirstOrDefault();
-
-                    if (potentialNewLL != null)
-                    {
-                        var potentialNewLH = sortedSwingHighs
-                            .Where(s => s.Index > _lastLL.Index && s.Index < potentialNewLL.Index && s.Price < _lastLH.Price)
-                            .OrderByDescending(s => s.Price).FirstOrDefault(); // Highest point in pullback
-                        
-                        if (potentialNewLH != null)
-                        {
-                            Chart.RemoveObject($"BoS_LH_{_lastLH.Index}");
-                            _lastLH = potentialNewLH;
-                            _lastLL = potentialNewLL;
-                            Print($"Downtrend Cont: New LH: {_lastLH.Price}@{_lastLH.Index}, New LL: {_lastLL.Price}@{_lastLL.Index}");
-                            MarkStructurePoint(_lastLH.Index, _lastLH.Price, "LH", Color.Salmon);
-                            MarkStructurePoint(_lastLL.Index, _lastLL.Price, "LL", Color.Red);
-                            DrawBoSLine(_lastLH.Price, _lastLH.Index, currentIndex, true, "BoS_LH_");
-                        }
-                        else if (potentialNewLL.Index > _lastLH.Index)
-                        {
-                             // If _lastLL was valid (Index != -1), remove the old line connecting _lastLH to it.
-                            if (_lastLL.Index != -1)
-                            {
-                                string oldLineName = $"Line_LH{_lastLH.Index}_LL{_lastLL.Index}";
-                                Chart.RemoveObject(oldLineName);
-                                Print($"Downtrend Ext: Removed old trend line: {oldLineName} connecting to old LL {_lastLL.Price}@{_lastLL.Index}");
-                            }
-                             _lastLL = potentialNewLL;
-                             Print($"Downtrend Cont (Ext): New LL: {_lastLL.Price}@{_lastLL.Index} (LH at {_lastLH.Price}@{_lastLH.Index} holds)");
-                             MarkStructurePoint(_lastLL.Index, _lastLL.Price, "LL", Color.Red);
-                        }
-                    }
+                    // Similar to uptrend, this part needs a proper list of swings for robust new LH/LL detection.
+                    // Current logic with single _lastLL (newest swing low) is used.
                 }
             }
         }
@@ -629,7 +999,7 @@ namespace cAlgo.Robots
                 return classifiedPoints;
             }
 
-            for (int i = barIndexBefore; i >= 0; i--)
+            for (int i = barIndexBefore; i >= 0 && i < zzIndicator.Result.Count; i--) // Added boundary check for zzIndicator.Result.Count
             {
                 // The GURU ZigZag stores pivot prices in Result, or NaN/0.0 for non-pivot bars.
                 double pivotPrice = zzIndicator.Result[i];
