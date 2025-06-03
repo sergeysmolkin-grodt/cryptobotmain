@@ -54,6 +54,16 @@ namespace cAlgo.Robots
                 return;
             }
             
+            Print("In OnStart, after ZigZag Init: _zigZag.Result.Count = {0}", _zigZag.Result.Count);
+            if (_zigZag.Result.Count > 1) 
+            {
+                Print("In OnStart, latest ZigZag results: LastValue={0}, SecondLastValue={1}", _zigZag.Result.LastValue, _zigZag.Result.Last(1));
+            }
+            else if (_zigZag.Result.Count == 1)
+            {
+                Print("In OnStart, only one ZigZag result: LastValue={0}", _zigZag.Result.LastValue);
+            }
+            
             // Проверка, установился ли режим ZigZag (MyModeZigZag - это свойство с [Parameter] в вашем индикаторе)
             // Это несколько сложнее проверить напрямую после GetIndicator, так как cTrader обрабатывает установку параметров.
             // Можно предположить, что если GetIndicator не вызвал ошибку и параметры переданы, то они установлены.
